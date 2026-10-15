@@ -12,11 +12,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -87,16 +89,41 @@ fun SiriOrb(
         SiriCyan.copy(alpha = 0.85f)
     )
 
+    // Container clipped to CircleShape to guarantee 100% roundness on all Android hardware
     Box(
         contentAlignment = Alignment.Center,
-        modifier = modifier.size(size)
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
     ) {
-        // Outer Ambient Glow
+        // 1. Outer Circular Ambient Glow (Pure radial gradient - no square blur clipping)
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .scale(dynamicScale * 1.35f)
-                .blur(28.dp)
+                .clip(CircleShape)
+                .scale(dynamicScale)
+        ) {
+            val centerOffset = Offset(size.toPx() / 2f, size.toPx() / 2f)
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        SiriCyan.copy(alpha = 0.45f),
+                        SiriPurple.copy(alpha = 0.35f),
+                        SiriBlue.copy(alpha = 0.20f),
+                        Color.Transparent
+                    ),
+                    center = centerOffset,
+                    radius = size.toPx() / 2f
+                )
+            )
+        }
+
+        // 2. Rotating 3D Fluid Light Disk
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .scale(dynamicScale * 0.88f)
         ) {
             rotate(rotation) {
                 drawCircle(
@@ -106,51 +133,46 @@ fun SiriOrb(
             }
         }
 
-        // Middle Fluid Light Layer
+        // 3. Spherical 3D Depth Layer (Offset radial lighting for 3D sphere volume)
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .scale(dynamicScale * 1.15f)
-                .blur(14.dp)
+                .clip(CircleShape)
+                .scale(dynamicScale * 0.86f)
         ) {
-            rotate(-rotation * 1.3f) {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.9f),
-                            SiriCyan.copy(alpha = 0.7f),
-                            SiriPurple.copy(alpha = 0.5f),
-                            Color.Transparent
-                        )
-                    ),
-                    radius = size.toPx() / 2.5f
-                )
-            }
-        }
-
-        // Core Glowing Orb
-        Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .scale(dynamicScale)
-        ) {
-            rotate(rotation) {
-                drawCircle(
-                    brush = Brush.sweepGradient(gradientColors),
-                    radius = size.toPx() / 3.0f
-                )
-            }
-            // Bright center core reflection
+            val lightCenter = Offset(size.toPx() * 0.38f, size.toPx() * 0.35f)
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        Color.White.copy(alpha = 0.95f),
-                        SiriCyan.copy(alpha = 0.8f),
+                        Color.White.copy(alpha = 0.85f),
+                        SiriCyan.copy(alpha = 0.70f),
+                        SiriPurple.copy(alpha = 0.50f),
+                        Color(0xFF0A001A).copy(alpha = 0.80f)
+                    ),
+                    center = lightCenter,
+                    radius = size.toPx() / 2.2f
+                )
+            )
+        }
+
+        // 4. Specular Gloss Reflection (Apple Siri glass reflection at top curve)
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .scale(dynamicScale * 0.86f)
+        ) {
+            val highlightCenter = Offset(size.toPx() * 0.40f, size.toPx() * 0.30f)
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.90f),
+                        Color.White.copy(alpha = 0.40f),
                         Color.Transparent
                     ),
-                    center = Offset(size.toPx() / 2.1f, size.toPx() / 2.2f)
-                ),
-                radius = size.toPx() / 5.5f
+                    center = highlightCenter,
+                    radius = size.toPx() / 5.2f
+                )
             )
         }
     }
