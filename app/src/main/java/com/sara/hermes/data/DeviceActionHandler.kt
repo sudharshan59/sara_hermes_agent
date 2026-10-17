@@ -6,11 +6,16 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.Uri
+import android.os.BatteryManager
 import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.KeyEvent
 import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 class DeviceActionHandler(private val context: Context) {
 
@@ -19,11 +24,45 @@ class DeviceActionHandler(private val context: Context) {
         object NotHandled : ActionResult()
     }
 
-    fun tryExecute(query: String): ActionResult {
+    fun tryExecute(query: String, preferredLanguage: String = "auto"): ActionResult {
         val raw = query.trim().lowercase()
         val q = raw.replace(Regex("[.,!?]"), "").trim()
-        val isTamil = q.any { it in '\u0B80'..'\u0BFF' } || 
-                      q.contains("pannu") || q.contains("podu") || q.contains("thira") || q.contains("mathu") || q.contains("niruthu")
+        val isTamil = when (preferredLanguage) {
+            "ta" -> true
+            "en" -> false
+            else -> q.any { it in '\u0B80'..'\u0BFF' } || 
+                    q.contains("pannu") || q.contains("podu") || q.contains("thira") || q.contains("mathu") || q.contains("niruthu")
+        }
+
+        // ========================================== 
+        // 0A. Phone Battery Status
+        // ========================================== 
+        if (q.contains("battery") || q.contains("charge") || q.contains("பேட்டரி") || 
+            q.contains("சார்ஜ்") || q.contains("power level")) {
+            if (q.contains("percent") || q.contains("level") || q.contains("status") || 
+                q.contains("how much") || q.contains("what is") || q.contains("what's") || 
+                q.contains("check") || q.contains("எவ்வளவு") || q.contains("சதவீதம்") || 
+                q.contains("enna") || q == "battery" || q == "battery status" || q == "பேட்டரி") {
+                return getBatteryInfo(isTamil)
+            }
+        }
+
+        // ========================================== 
+        // 0B. Current Time & Date
+        // ========================================== 
+        if (q == "time" || q.contains("what time") || q.contains("what's the time") || 
+            q.contains("current time") || q.contains("tell me the time") || q.contains("time please") || 
+            q.contains("time enna") || q.contains("நேரம் என்ன") || q.contains("மணி என்ன") || 
+            q.contains("இப்போ மணி") || q.contains("இப்ப மணி") || q.contains("time now")) {
+            return getCurrentTime(isTamil)
+        }
+
+        if (q == "date" || q.contains("what date") || q.contains("today's date") || 
+            q.contains("what day is today") || q.contains("what day is it") || 
+            q.contains("இன்றைய தேதி") || q.contains("இன்று என்ன நாள்") || q.contains("இன்று என்ன கிழமை") || 
+            q.contains("date enna") || q.contains("thethi enna")) {
+            return getCurrentDate(isTamil)
+        }
 
         // ========================================== 
         // 1. Universal Media Playback Controls (YouTube, Spotify, Music Players)
@@ -169,14 +208,27 @@ class DeviceActionHandler(private val context: Context) {
         }
 
         // ========================================== 
-        // 9. Google Web search
+        // 9. Web & Google Search
         // ========================================== 
-        if (q.contains("on google") || q.startsWith("google ") || q.contains("கூகிளில்")) {
-            val searchQuery = q.replace("on google", "")
-                .replace("கூகிளில்", "")
-                .removePrefix("google ")
+        if (q.startsWith("search for ") || q.startsWith("search ") || 
+            q.startsWith("google search ") || q.startsWith("google ") || 
+            q.contains("on google") || q.contains("கூகிளில்") || 
+            q.contains("search pannu") || q.startsWith("look up ") || 
+            q.startsWith("find online ") || q.startsWith("browse ") || 
+            q.endsWith(" தேடு") || q.contains("வலையில் தேடு") || q.contains("வலைதளத்தில் தேடு")) {
+            val searchQuery = q.removePrefix("search for ")
                 .removePrefix("search ")
-                .replace("தேடு", "")
+                .removePrefix("google search ")
+                .removePrefix("google ")
+                .removePrefix("look up ")
+                .removePrefix("find online ")
+                .removePrefix("browse ")
+                .replace("on google", "")
+                .replace("கூகிளில்", "")
+                .replace("search pannu", "")
+                .replace("வலையில் தேடு", "")
+                .replace("வலைதளத்தில் தேடு", "")
+                .removeSuffix(" தேடு")
                 .trim()
             if (searchQuery.isNotBlank()) {
                 return handleWebSearch(searchQuery, isTamil)
@@ -520,5 +572,70 @@ class DeviceActionHandler(private val context: Context) {
             }
             context.startActivity(homeIntent)
         } catch (_: Throwable) {}
+    }
+
+    // --- Battery Info Helper ---
+    private fun getBatteryInfo(isTamil: Boolean): ActionResult {
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        val level = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        val isCharging = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val status = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS)
+            status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        } else {
+            false
+        }
+
+        val speech = if (level >= 0) {
+            if (isTamil) {
+                val chargingText = if (isCharging) " மற்றும் சார்ஜ் ஆகிறது" else ""
+                "உங்கள் போன் பேட்டரி $level சதவீதம் உள்ளது$chargingText"
+            } else {
+                val chargingText = if (isCharging) " and currently charging" else ""
+                "Your battery is at $level percent$chargingText"
+            }
+        } else {
+            if (isTamil) "பேட்டரி நிலையை கண்டறிய முடியவில்லை" else "Could not determine battery level"
+        }
+
+        return ActionResult.Handled(speech) {}
+    }
+
+    // --- Current Time Helper ---
+    private fun getCurrentTime(isTamil: Boolean): ActionResult {
+        val cal = Calendar.getInstance()
+        val hour12 = cal.get(Calendar.HOUR).let { if (it == 0) 12 else it }
+        val minute = cal.get(Calendar.MINUTE)
+        val isAm = cal.get(Calendar.AM_PM) == Calendar.AM
+        val amPmStr = if (isAm) "AM" else "PM"
+        val minStr = if (minute < 10) "0$minute" else "$minute"
+
+        val speech = if (isTamil) {
+            val period = when (cal.get(Calendar.HOUR_OF_DAY)) {
+                in 4..11 -> "காலை"
+                in 12..15 -> "மதியம்"
+                in 16..19 -> "மாலை"
+                else -> "இரவு"
+            }
+            "இப்போது நேரம் $period $hour12:$minStr"
+        } else {
+            "The time is $hour12:$minStr $amPmStr"
+        }
+
+        return ActionResult.Handled(speech) {}
+    }
+
+    // --- Current Date Helper ---
+    private fun getCurrentDate(isTamil: Boolean): ActionResult {
+        val now = Date()
+        val speech = if (isTamil) {
+            val dayFormat = SimpleDateFormat("EEEE", Locale("ta", "IN"))
+            val dateFormat = SimpleDateFormat("d MMMM yyyy", Locale("ta", "IN"))
+            "இன்று ${dayFormat.format(now)}, ${dateFormat.format(now)}"
+        } else {
+            val format = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.US)
+            "Today is ${format.format(now)}"
+        }
+
+        return ActionResult.Handled(speech) {}
     }
 }

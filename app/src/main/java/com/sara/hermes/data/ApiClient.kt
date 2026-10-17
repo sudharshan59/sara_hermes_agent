@@ -28,17 +28,30 @@ class ApiClient(private val getBaseUrl: () -> String) {
 
     suspend fun submitTask(
         text: String,
+        history: List<ChatMessage> = emptyList(),
         onStatusUpdate: (String) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
         val baseUrl = getBaseUrl().trimEnd('/')
         try {
             onStatusUpdate("thinking")
 
+            val historyArray = org.json.JSONArray()
+            for (msg in history.takeLast(5)) {
+                val obj = JSONObject().apply {
+                    put("role", if (msg.isUser) "user" else "assistant")
+                    put("content", msg.text)
+                }
+                historyArray.put(obj)
+            }
+
             // 1. Try synchronous /api/v1/chat for fast direct answer
             try {
                 val chatBody = JSONObject().apply {
                     put("message", text)
                     put("client_id", "com.sara.hermes")
+                    if (historyArray.length() > 0) {
+                        put("history", historyArray)
+                    }
                 }
                 val chatRequest = Request.Builder()
                     .url("$baseUrl/api/v1/chat")
@@ -62,6 +75,9 @@ class ApiClient(private val getBaseUrl: () -> String) {
             val jsonBody = JSONObject().apply {
                 put("prompt", text)
                 put("client_id", "com.sara.hermes")
+                if (historyArray.length() > 0) {
+                    put("history", historyArray)
+                }
             }
 
             val request = Request.Builder()

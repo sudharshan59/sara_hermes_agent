@@ -10,6 +10,8 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
+import android.util.Log
 import java.util.Locale
 
 class SpeechManager(
@@ -25,11 +27,24 @@ class SpeechManager(
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var isTtsReady = false
+    var preferredLanguage: String = "auto" // "auto", "ta", "en"
+
+    fun setLanguage(lang: String) {
+        preferredLanguage = lang
+        if (isTtsReady) {
+            setupOptimalVoice(isTamil = lang == "ta")
+        }
+    }
 
     init {
         try {
-            textToSpeech = TextToSpeech(context.applicationContext, this)
-        } catch (_: Exception) {}
+            // Prefer Google Speech Services engine for studio-quality neural voices
+            textToSpeech = TextToSpeech(context.applicationContext, this, "com.google.android.tts")
+        } catch (_: Exception) {
+            try {
+                textToSpeech = TextToSpeech(context.applicationContext, this)
+            } catch (_: Exception) {}
+        }
     }
 
     fun isRecognitionSupported(): Boolean {
@@ -108,11 +123,26 @@ class SpeechManager(
 
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                    putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("ta-IN", "en-IN", "en-US"))
+                    when (preferredLanguage) {
+                        "ta" -> {
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ta-IN")
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ta-IN")
+                        }
+                        "en" -> {
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US")
+                        }
+                        else -> {
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("ta-IN", "en-IN", "en-US"))
+                        }
+                    }
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
                     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 750L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 750L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
                 }
                 speechRecognizer?.startListening(intent)
             } catch (e: Throwable) {
@@ -137,20 +167,12 @@ class SpeechManager(
             return
         }
 
-        val hasTamil = text.any { it in '\u0B80'..'\u0BFF' }
-        if (hasTamil) {
-            try {
-                val tamilLocale = Locale("ta", "IN")
-                val res = textToSpeech?.setLanguage(tamilLocale)
-                if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    textToSpeech?.language = Locale.getDefault()
-                }
-            } catch (_: Throwable) {
-                textToSpeech?.language = Locale.getDefault()
-            }
-        } else {
-            textToSpeech?.language = Locale.US
+        val isTamil = when (preferredLanguage) {
+            "ta" -> true
+            "en" -> false
+            else -> text.any { it in '\u0B80'..'\u0BFF' }
         }
+        setupOptimalVoice(isTamil)
 
         textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
@@ -166,14 +188,64 @@ class SpeechManager(
         textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "utterance_${System.currentTimeMillis()}")
     }
 
+    private fun setupOptimalVoice(isTamil: Boolean) {
+        val tts = textToSpeech ?: return
+        val targetLocale = if (isTamil) Locale("ta", "IN") else Locale.US
+        try {
+            val res = tts.setLanguage(targetLocale)
+            if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                if (isTamil) {
+                    Log.w("SpeechManager", "Tamil TTS data missing, falling back to default locale")
+                    tts.language = Locale.getDefault()
+                }
+            }
+        } catch (_: Throwable) {
+            tts.language = Locale.getDefault()
+        }
+
+        // Natural pitch and rate tuning for fluid speech flow
+        tts.setPitch(1.05f)
+        tts.setSpeechRate(0.96f)
+
+        try {
+            val voices = tts.voices
+            if (!voices.isNullOrEmpty()) {
+                val matchedVoice = if (isTamil) {
+                    voices.firstOrNull { v ->
+                        val n = v.name.lowercase()
+                        (v.locale.language == "ta" || n.contains("ta-in") || n.contains("tamil")) &&
+                        (n.contains("network") || n.contains("neural") || n.contains("taf") || v.quality >= Voice.QUALITY_HIGH)
+                    } ?: voices.firstOrNull { v ->
+                        v.locale.language == "ta" || v.name.lowercase().contains("ta-in")
+                    }
+                } else {
+                    voices.firstOrNull { v ->
+                        val n = v.name.lowercase()
+                        (n.contains("en-us") || n.contains("en_us")) &&
+                        (n.contains("neural") || n.contains("network") || n.contains("female") || n.contains("sfg"))
+                    } ?: voices.firstOrNull { v ->
+                        v.locale.language == "en"
+                    }
+                }
+
+                if (matchedVoice != null) {
+                    tts.voice = matchedVoice
+                    Log.d("SpeechManager", "Selected Optimal Voice: ${matchedVoice.name}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SpeechManager", "Voice selection fallback: ${e.message}")
+        }
+    }
+
     fun stopSpeaking() {
         textToSpeech?.stop()
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            textToSpeech?.language = Locale.US
             isTtsReady = true
+            setupOptimalVoice(isTamil = false)
         }
     }
 

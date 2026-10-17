@@ -34,10 +34,18 @@ class HeySiriService : Service() {
 
         const val ACTION_START = "com.sara.hermes.action.START_HOTWORD"
         const val ACTION_STOP = "com.sara.hermes.action.STOP_HOTWORD"
+        const val ACTION_PAUSE = "com.sara.hermes.action.PAUSE_HOTWORD"
+        const val ACTION_RESUME = "com.sara.hermes.action.RESUME_HOTWORD"
 
         @Volatile
         var isRunning = false
             private set
+
+        @Volatile
+        var isPausedForActivity = false
+            private set
+
+        private var instance: HeySiriService? = null
 
         fun start(context: Context) {
             val intent = Intent(context, HeySiriService::class.java).apply {
@@ -56,45 +64,142 @@ class HeySiriService : Service() {
             }
             context.startService(intent)
         }
+
+        fun pause(context: Context? = null) {
+            isPausedForActivity = true
+            val activeInstance = instance
+            if (activeInstance != null) {
+                activeInstance.pauseListeningInternal()
+            } else if (context != null) {
+                try {
+                    val intent = Intent(context, HeySiriService::class.java).apply {
+                        action = ACTION_PAUSE
+                    }
+                    context.startService(intent)
+                } catch (_: Throwable) {}
+            }
+        }
+
+        fun resume(context: Context? = null, delayMs: Long = 300) {
+            isPausedForActivity = false
+            val activeInstance = instance
+            if (activeInstance != null) {
+                activeInstance.resumeListeningInternal(delayMs)
+            } else if (context != null) {
+                try {
+                    val intent = Intent(context, HeySiriService::class.java).apply {
+                        action = ACTION_RESUME
+                    }
+                    context.startService(intent)
+                } catch (_: Throwable) {}
+            }
+        }
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isListening = false
     private var shouldKeepListening = true
+    private var isTriggeringHotword = false
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         createNotificationChannel()
+        acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopListeningLoop()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            isRunning = false
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopListeningLoop()
+                releaseWakeLock()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                isRunning = false
+                instance = null
+                return START_NOT_STICKY
+            }
+            ACTION_PAUSE -> {
+                pauseListeningInternal()
+                return START_STICKY
+            }
+            ACTION_RESUME -> {
+                resumeListeningInternal(300)
+                return START_STICKY
+            }
         }
 
         val notification = buildForegroundNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-            } else {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-            }
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
 
         isRunning = true
         shouldKeepListening = true
+        isPausedForActivity = false
+        isTriggeringHotword = false
+        acquireWakeLock()
         startListeningLoop()
 
         return START_STICKY
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sara:HeySiriServiceWakeLock")
+                wakeLock?.setReferenceCounted(false)
+                wakeLock?.acquire()
+                Log.d(TAG, "Acquired partial CPU wake lock for continuous background listening")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire CPU wake lock: ${e.message}")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                Log.d(TAG, "Released CPU wake lock")
+            }
+        } catch (_: Throwable) {}
+        wakeLock = null
+    }
+
+    fun pauseListeningInternal() {
+        isPausedForActivity = true
+        mainHandler.removeCallbacksAndMessages(null)
+        mainHandler.post {
+            destroyRecognizer()
+        }
+    }
+
+    fun resumeListeningInternal(delayMs: Long = 300) {
+        isPausedForActivity = false
+        isTriggeringHotword = false
+        mainHandler.removeCallbacksAndMessages(null)
+        mainHandler.postDelayed({
+            if (!isPausedForActivity && shouldKeepListening) {
+                startListeningLoop()
+            }
+        }, delayMs)
+    }
+
+    private fun destroyRecognizer() {
+        try {
+            speechRecognizer?.cancel()
+            speechRecognizer?.destroy()
+        } catch (_: Throwable) {}
+        speechRecognizer = null
+        isListening = false
     }
 
     private fun createNotificationChannel() {
@@ -146,16 +251,22 @@ class HeySiriService : Service() {
     }
 
     private fun startListeningLoop() {
-        if (!shouldKeepListening) return
+        if (!shouldKeepListening || isPausedForActivity || isTriggeringHotword) return
+
         mainHandler.post {
+            if (!shouldKeepListening || isPausedForActivity || isTriggeringHotword) return@post
+
             try {
-                if (speechRecognizer == null) {
-                    if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                        Log.w(TAG, "Speech recognition not available for hotword")
-                        return@post
-                    }
-                    speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-                    speechRecognizer?.setRecognitionListener(createListener())
+                if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                    Log.w(TAG, "Speech recognition not available for hotword")
+                    restartListeningWithDelay(1500)
+                    return@post
+                }
+
+                destroyRecognizer()
+
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+                    setRecognitionListener(createListener())
                 }
 
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -164,25 +275,26 @@ class HeySiriService : Service() {
                     putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("ta-IN", "en-IN", "en-US"))
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 600L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 600L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 200L)
                 }
 
                 isListening = true
                 speechRecognizer?.startListening(intent)
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting hotword listening: ${e.message}")
-                restartListeningWithDelay(1000)
+                destroyRecognizer()
+                restartListeningWithDelay(800)
             }
         }
     }
 
     private fun restartListeningWithDelay(delayMs: Long) {
-        if (!shouldKeepListening) return
+        if (!shouldKeepListening || isPausedForActivity) return
         mainHandler.removeCallbacksAndMessages(null)
         mainHandler.postDelayed({
-            if (shouldKeepListening) {
-                try {
-                    speechRecognizer?.cancel()
-                } catch (_: Throwable) {}
+            if (shouldKeepListening && !isPausedForActivity && !isTriggeringHotword) {
                 startListeningLoop()
             }
         }, delayMs)
@@ -201,27 +313,38 @@ class HeySiriService : Service() {
 
             override fun onError(error: Int) {
                 isListening = false
-                // Automatically restart listening on error (timeout, no match, etc.)
-                restartListeningWithDelay(400)
+                if (isPausedForActivity || isTriggeringHotword) return
+
+                val delay = when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 150L
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+                    SpeechRecognizer.ERROR_AUDIO -> 800L
+                    else -> 400L
+                }
+
+                destroyRecognizer()
+                restartListeningWithDelay(delay)
             }
 
             override fun onResults(results: Bundle?) {
                 isListening = false
+                if (isPausedForActivity || isTriggeringHotword) return
+
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (matches != null && checkHotwordMatches(matches)) {
-                    // Hotword detected!
                     return
                 }
-                restartListeningWithDelay(250)
+                destroyRecognizer()
+                restartListeningWithDelay(150)
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
+                if (isPausedForActivity || isTriggeringHotword) return
+
                 val partials = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (partials != null && checkHotwordMatches(partials)) {
                     // Hotword detected early!
-                    try {
-                        speechRecognizer?.cancel()
-                    } catch (_: Throwable) {}
                 }
             }
 
@@ -230,6 +353,8 @@ class HeySiriService : Service() {
     }
 
     private fun checkHotwordMatches(phrases: List<String>): Boolean {
+        if (isTriggeringHotword || isPausedForActivity) return false
+
         for (phrase in phrases) {
             val lower = phrase.lowercase().trim()
             if (containsHotword(lower)) {
@@ -243,31 +368,40 @@ class HeySiriService : Service() {
 
     private fun containsHotword(text: String): Boolean {
         val hotwords = listOf(
-            "hey siri",
-            "siri",
-            "hello siri",
-            "hi siri",
-            "ok siri",
-            "ஹே சிரி",
-            "சிரி"
+            "hey siri", "siri", "hello siri", "hi siri", "ok siri",
+            "hey sara", "sara", "hello sara", "hi sara", "ok sara",
+            "serious", "hey serious", "shiri", "serie", "seri",
+            "cereal", "hey cereal",
+            "ஹே சிரி", "சிரி", "ஹே சீரி", "சீரி", "ஹே சாரா", "சாரா"
         )
-        return hotwords.any { text.contains(it) }
+        if (hotwords.any { text.contains(it) }) return true
+
+        val words = text.split(" ", "-", "_")
+        return words.any { it in listOf("siri", "sara", "serious", "serie", "shiri", "சிரி", "சீரி", "சாரா") }
     }
 
     private fun handleHotwordDetected(phrase: String) {
+        if (isTriggeringHotword) return
+        isTriggeringHotword = true
+        isPausedForActivity = true
+
+        mainHandler.removeCallbacksAndMessages(null)
+        destroyRecognizer()
+
         vibrateBriefly()
         wakeScreen()
 
-        // Extract command if user said "Hey Siri open YouTube" in one breath
-        val cleanCommand = phrase
-            .replace("hey siri", "")
-            .replace("hello siri", "")
-            .replace("hi siri", "")
-            .replace("ok siri", "")
-            .replace("siri", "")
-            .replace("ஹே சிரி", "")
-            .replace("சிரி", "")
-            .trim()
+        var cleanCommand = phrase
+        val stripWords = listOf(
+            "hey siri", "hello siri", "hi siri", "ok siri", "siri",
+            "hey sara", "hello sara", "hi sara", "ok sara", "sara",
+            "hey serious", "serious", "cereal",
+            "ஹே சிரி", "சிரி", "ஹே சீரி", "சீரி", "ஹே சாரா", "சாரா"
+        )
+        for (w in stripWords) {
+            cleanCommand = cleanCommand.replace(w, "")
+        }
+        cleanCommand = cleanCommand.trim()
 
         val openIntent = Intent(this, MainActivity::class.java).apply {
             action = "ACTION_HEY_SIRI"
@@ -282,21 +416,21 @@ class HeySiriService : Service() {
             startActivity(openIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start MainActivity directly: ${e.message}")
+            isTriggeringHotword = false
+            isPausedForActivity = false
+            restartListeningWithDelay(2000)
         }
-
-        // Pause service listening so it doesn't collide with MainActivity's microphone
-        restartListeningWithDelay(5000)
     }
 
     private fun wakeScreen() {
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             @Suppress("DEPRECATION")
-            val wakeLock = powerManager?.newWakeLock(
+            val screenWakeLock = powerManager?.newWakeLock(
                 PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "sara:HeySiriWakeLock"
+                "sara:HeySiriScreenWakeLock"
             )
-            wakeLock?.acquire(3000)
+            screenWakeLock?.acquire(3000)
         } catch (_: Throwable) {}
     }
 
@@ -305,29 +439,28 @@ class HeySiriService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
                 vibratorManager?.defaultVibrator?.vibrate(
-                    VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE)
+                    VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE)
                 )
             } else {
                 @Suppress("DEPRECATION")
                 val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                vibrator?.vibrate(120)
+                vibrator?.vibrate(100)
             }
         } catch (_: Throwable) {}
     }
 
     private fun stopListeningLoop() {
         shouldKeepListening = false
+        isPausedForActivity = true
         mainHandler.removeCallbacksAndMessages(null)
-        try {
-            speechRecognizer?.destroy()
-        } catch (_: Throwable) {}
-        speechRecognizer = null
-        isListening = false
+        destroyRecognizer()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopListeningLoop()
+        releaseWakeLock()
         isRunning = false
+        instance = null
     }
 }

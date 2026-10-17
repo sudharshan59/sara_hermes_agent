@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
     private var backendUrl by mutableStateOf("http://10.0.2.2:8000")
     private var isBackgroundListening by mutableStateOf(true)
     private var isOverlayMode by mutableStateOf(false)
+    private var selectedLanguage by mutableStateOf("auto")
 
     private lateinit var speechManager: SpeechManager
     private lateinit var apiClient: ApiClient
@@ -115,6 +116,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("sara_prefs", MODE_PRIVATE)
         backendUrl = prefs.getString("backend_url", "http://10.0.2.2:8000") ?: "http://10.0.2.2:8000"
         isBackgroundListening = prefs.getBoolean("bg_listening", true)
+        selectedLanguage = prefs.getString("voice_lang", "auto") ?: "auto"
 
         if (isBackgroundListening && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             HeySiriService.start(this)
@@ -151,6 +153,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         )
+        speechManager.setLanguage(selectedLanguage)
 
         // Initial welcome message
         messages.add(
@@ -190,6 +193,13 @@ class MainActivity : ComponentActivity() {
                     SettingsDialog(
                         currentUrl = backendUrl,
                         isBackgroundListening = isBackgroundListening,
+                        currentLanguage = selectedLanguage,
+                        onLanguageChange = { lang ->
+                            selectedLanguage = lang
+                            speechManager.setLanguage(lang)
+                            val prefs = getSharedPreferences("sara_prefs", MODE_PRIVATE)
+                            prefs.edit().putString("voice_lang", lang).apply()
+                        },
                         onToggleBackgroundListening = { enabled ->
                             isBackgroundListening = enabled
                             prefs.edit().putBoolean("bg_listening", enabled).apply()
@@ -256,12 +266,12 @@ private fun handleIncomingIntent(incomingIntent: Intent?) {
 
         if (!command.isNullOrBlank()) {
             lifecycleScope.launch {
-                delay(300)
+                delay(50)
                 processUserInput(command)
             }
         } else if (action == "ACTION_HEY_SIRI" || action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND) {
             lifecycleScope.launch {
-                delay(350)
+                delay(50)
                 if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                     toggleListening()
                 } else {
@@ -318,7 +328,7 @@ private fun handleIncomingIntent(incomingIntent: Intent?) {
         currentTranscript = ""
 
         // 1. Siri-style local device actions (Open YouTube, WhatsApp, Camera, Settings, etc.)
-        val localAction = deviceActionHandler.tryExecute(input)
+        val localAction = deviceActionHandler.tryExecute(input, selectedLanguage)
         if (localAction is DeviceActionHandler.ActionResult.Handled) {
             messages.add(ChatMessage(text = localAction.speechResponse, isUser = false))
             currentStatus = localAction.speechResponse
@@ -359,7 +369,8 @@ private fun handleIncomingIntent(incomingIntent: Intent?) {
         currentStatus = "Connecting to Hermes..."
 
         lifecycleScope.launch {
-            val result = apiClient.submitTask(input) { statusUpdate ->
+            val recentHistory = messages.dropLast(1).takeLast(5)
+            val result = apiClient.submitTask(input, history = recentHistory) { statusUpdate ->
                 currentStatus = statusUpdate.replaceFirstChar { it.uppercase() }
             }
 
@@ -391,8 +402,25 @@ private fun handleIncomingIntent(incomingIntent: Intent?) {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (isBackgroundListening) {
+            HeySiriService.pause(this)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (isBackgroundListening) {
+            HeySiriService.resume(this, 300)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         speechManager.destroy()
+        if (isBackgroundListening) {
+            HeySiriService.resume(this, 300)
+        }
     }
 }

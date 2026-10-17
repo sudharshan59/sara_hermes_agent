@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -34,6 +35,8 @@ import androidx.compose.ui.unit.sp
 fun SettingsDialog(
     currentUrl: String,
     isBackgroundListening: Boolean,
+    currentLanguage: String = "auto",
+    onLanguageChange: (String) -> Unit = {},
     onToggleBackgroundListening: (Boolean) -> Unit,
     onOpenAssistSettings: () -> Unit,
     onSave: (String) -> Unit,
@@ -41,6 +44,7 @@ fun SettingsDialog(
 ) {
     var urlText by remember { mutableStateOf(currentUrl) }
     var bgListening by remember { mutableStateOf(isBackgroundListening) }
+    var selectedLang by remember { mutableStateOf(currentLanguage) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -55,7 +59,55 @@ fun SettingsDialog(
         },
         text = {
             Column {
-                // 1. Background Wake-word 'Hey Siri'
+                // 1. Voice Language Selection
+                Text(
+                    text = "Voice Assistant Language",
+                    color = TextPrimary,
+                    fontSize = 15.sp
+                )
+                Text(
+                    text = "Speech recognition and spoken response language",
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val langOptions = listOf(
+                        "auto" to "Auto",
+                        "ta" to "தமிழ்",
+                        "en" to "English"
+                    )
+                    langOptions.forEach { (code, label) ->
+                        val isSelected = selectedLang == code
+                        Button(
+                            onClick = {
+                                selectedLang = code
+                                onLanguageChange(code)
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isSelected) SiriCyan else Color.White.copy(alpha = 0.12f)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (isSelected) Color.Black else TextPrimary,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                HorizontalDivider(color = Color.White.copy(alpha = 0.15f))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 2. Background Wake-word 'Hey Siri'
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,

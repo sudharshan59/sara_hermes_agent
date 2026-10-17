@@ -14,7 +14,7 @@ class HermesAdapter:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=60.0)
 
-    async def execute_task(self, task_id: str, prompt: str):
+    async def execute_task(self, task_id: str, prompt: str, history: Optional[Any] = None):
         """
         Executes the user prompt via Hermes Agent or configured LLM/NIM provider.
         Streams state transitions to task_manager.
@@ -29,21 +29,21 @@ class HermesAdapter:
 
             # Check if Hermes Gateway or CLI is configured
             if settings.HERMES_MODE in ["hermes_gateway", "auto"] and await self._is_hermes_gateway_alive():
-                result_text = await self._run_via_hermes_gateway(prompt)
+                result_text = await self._run_via_hermes_gateway(prompt, history)
             elif settings.HERMES_MODE in ["hermes_cli", "auto"] and shutil.which(settings.HERMES_BIN_PATH):
                 await task_manager.update_status(
                     task_id=task_id,
                     status="executing",
                     detail="Executing task via Hermes Agent..."
                 )
-                result_text = await self._run_via_hermes_cli(prompt)
+                result_text = await self._run_via_hermes_cli(prompt, history)
             elif settings.NVIDIA_API_KEY:
                 await task_manager.update_status(
                     task_id=task_id,
                     status="executing",
                     detail="Generating response with NVIDIA NIM..."
                 )
-                result_text = await self._run_via_nvidia_nim(prompt)
+                result_text = await self._run_via_nvidia_nim(prompt, history)
             else:
                 # Standalone fallback if neither is currently keyed
                 await task_manager.update_status(
@@ -78,22 +78,30 @@ class HermesAdapter:
         except Exception:
             return False
 
-    async def _run_via_hermes_gateway(self, prompt: str) -> str:
+    async def _run_via_hermes_gateway(self, prompt: str, history: Optional[Any] = None) -> str:
+        payload = {"message": prompt}
+        if history:
+            payload["history"] = history[-5:]
         resp = await self.client.post(
             f"{settings.HERMES_GATEWAY_URL}/api/v1/chat",
-            json={"message": prompt},
+            json=payload,
             timeout=settings.MAX_TASK_TIMEOUT_SECONDS
         )
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", data.get("text", str(data)))
 
-    async def _run_via_hermes_cli(self, prompt: str) -> str:
+    async def _run_via_hermes_cli(self, prompt: str, history: Optional[Any] = None) -> str:
         """Runs hermes in non-interactive one-shot mode."""
         loop = asyncio.get_event_loop()
+        full_prompt = prompt
+        if history:
+            hist_lines = [f"{h.get('role', 'user').capitalize()}: {h.get('content', '')}" for h in history[-5:]]
+            hist_str = "\n".join(hist_lines)
+            full_prompt = f"Previous conversation history:\n{hist_str}\n\nCurrent User Request: {prompt}"
         def _invoke():
             proc = subprocess.run(
-                [settings.HERMES_BIN_PATH, "chat", "-q", prompt],
+                [settings.HERMES_BIN_PATH, "chat", "-q", full_prompt],
                 capture_output=True,
                 text=True,
                 timeout=settings.MAX_TASK_TIMEOUT_SECONDS
@@ -126,7 +134,7 @@ class HermesAdapter:
             pass
         return ""
 
-    async def _run_via_nvidia_nim(self, prompt: str) -> str:
+    async def _run_via_nvidia_nim(self, prompt: str, history: Optional[Any] = None) -> str:
         now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
         live_context = await self._fetch_realtime_context(prompt)
 
@@ -138,16 +146,22 @@ class HermesAdapter:
         if live_context:
             system_content += f"\n\nReal-time web search results for the user's question:\n{live_context}\nUse these real-time search results to answer accurately."
 
+        messages = [{"role": "system", "content": system_content}]
+        if history:
+            for item in history[-5:]:
+                role = "assistant" if item.get("role") in ["assistant", "bot", "sara", "hermes"] else "user"
+                c = item.get("content", "").strip()
+                if c:
+                    messages.append({"role": role, "content": c})
+        messages.append({"role": "user", "content": prompt})
+
         headers = {
             "Authorization": f"Bearer {settings.NVIDIA_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
             "model": settings.NVIDIA_DEFAULT_MODEL,
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "temperature": 0.6,
             "max_tokens": 1024
         }
