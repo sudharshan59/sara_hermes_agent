@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # NVIDIA NIM Cloud Endpoints
     NVIDIA_API_KEY: str = ""
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
-    NVIDIA_DEFAULT_MODEL: str = "meta/llama-3.3-70b-instruct"
+    NVIDIA_DEFAULT_MODEL: str = "z-ai/glm-5.3-flash"
 
     # Task limits
     MAX_TASK_TIMEOUT_SECONDS: int = 120
