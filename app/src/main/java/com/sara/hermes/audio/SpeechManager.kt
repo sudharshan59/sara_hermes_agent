@@ -109,6 +109,7 @@ class SpeechManager(
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                    putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("ta-IN", "en-IN", "en-US"))
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
                     putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
@@ -135,6 +136,22 @@ class SpeechManager(
             onDone()
             return
         }
+
+        val hasTamil = text.any { it in '\u0B80'..'\u0BFF' }
+        if (hasTamil) {
+            try {
+                val tamilLocale = Locale("ta", "IN")
+                val res = textToSpeech?.setLanguage(tamilLocale)
+                if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    textToSpeech?.language = Locale.getDefault()
+                }
+            } catch (_: Throwable) {
+                textToSpeech?.language = Locale.getDefault()
+            }
+        } else {
+            textToSpeech?.language = Locale.US
+        }
+
         textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
                 onStart()

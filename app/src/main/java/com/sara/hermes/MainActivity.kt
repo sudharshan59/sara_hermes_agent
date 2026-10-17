@@ -3,7 +3,9 @@ package com.sara.hermes
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.widget.Toast
 import java.util.Locale
@@ -17,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.sara.hermes.audio.HeySiriService
 import com.sara.hermes.audio.SpeechManager
 import com.sara.hermes.data.ApiClient
 import com.sara.hermes.data.AssistantState
@@ -37,15 +40,20 @@ class MainActivity : ComponentActivity() {
     private val messages = mutableStateListOf<ChatMessage>()
     private var showSettingsDialog by mutableStateOf(false)
     private var backendUrl by mutableStateOf("http://10.0.2.2:8000")
+    private var isBackgroundListening by mutableStateOf(true)
 
     private lateinit var speechManager: SpeechManager
     private lateinit var apiClient: ApiClient
     private lateinit var deviceActionHandler: DeviceActionHandler
 
     private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val audioGranted = perms[Manifest.permission.RECORD_AUDIO] == true
+        if (audioGranted) {
+            if (isBackgroundListening) {
+                HeySiriService.start(this)
+            }
             toggleListening()
         } else {
             Toast.makeText(this, "Microphone permission is required for voice input", Toast.LENGTH_SHORT).show()
@@ -73,7 +81,8 @@ class MainActivity : ComponentActivity() {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to Siri...")
+                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("ta-IN", "en-IN", "en-US"))
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak now / பேசுங்கள்...")
             }
             assistantState = AssistantState.LISTENING
             speechIntentLauncher.launch(intent)
@@ -89,6 +98,11 @@ class MainActivity : ComponentActivity() {
         // Load saved preferences if any
         val prefs = getSharedPreferences("sara_prefs", MODE_PRIVATE)
         backendUrl = prefs.getString("backend_url", "http://10.0.2.2:8000") ?: "http://10.0.2.2:8000"
+        isBackgroundListening = prefs.getBoolean("bg_listening", true)
+
+        if (isBackgroundListening && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            HeySiriService.start(this)
+        }
 
         apiClient = ApiClient { backendUrl }
         deviceActionHandler = DeviceActionHandler(this)
@@ -146,13 +160,77 @@ class MainActivity : ComponentActivity() {
                 if (showSettingsDialog) {
                     SettingsDialog(
                         currentUrl = backendUrl,
+                        isBackgroundListening = isBackgroundListening,
+                        onToggleBackgroundListening = { enabled ->
+                            isBackgroundListening = enabled
+                            prefs.edit().putBoolean("bg_listening", enabled).apply()
+                            if (enabled) {
+                                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                    HeySiriService.start(this@MainActivity)
+                                    Toast.makeText(this@MainActivity, "Background 'Hey Siri' active", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    checkPermissionAndToggle()
+                                }
+                            } else {
+                                HeySiriService.stop(this@MainActivity)
+                                Toast.makeText(this@MainActivity, "Background listening stopped", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onOpenAssistSettings = {
+                            try {
+                                val assistIntent = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                startActivity(assistIntent)
+                            } catch (_: Exception) {
+                                try {
+                                    val manageIntent = Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(manageIntent)
+                                } catch (_: Exception) {
+                                    Toast.makeText(this@MainActivity, "Set Siri in Settings -> Apps -> Default apps -> Assist app", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
                         onSave = { newUrl ->
                             backendUrl = newUrl
                             prefs.edit().putString("backend_url", newUrl).apply()
-                            Toast.makeText(this, "Backend URL updated", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "Backend URL updated", Toast.LENGTH_SHORT).show()
                         },
                         onDismiss = { showSettingsDialog = false }
                     )
+                }
+            }
+        }
+
+        // Automatically handle wake-word intent if activity launched by HeySiriService or Assist
+        handleIncomingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(incomingIntent: Intent?) {
+        if (incomingIntent == null) return
+        val command = incomingIntent.getStringExtra("EXTRA_COMMAND")
+        val action = incomingIntent.action
+
+        if (!command.isNullOrBlank()) {
+            lifecycleScope.launch {
+                delay(300)
+                processUserInput(command)
+            }
+        } else if (action == "ACTION_HEY_SIRI" || action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND) {
+            lifecycleScope.launch {
+                delay(350)
+                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    toggleListening()
+                } else {
+                    checkPermissionAndToggle()
                 }
             }
         }
@@ -160,10 +238,19 @@ class MainActivity : ComponentActivity() {
 
     private fun checkPermissionAndToggle() {
         try {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            val audioPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            if (audioPerm) {
+                if (isBackgroundListening && !HeySiriService.isRunning) {
+                    HeySiriService.start(this)
+                }
                 toggleListening()
             } else {
-                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    arrayOf(Manifest.permission.RECORD_AUDIO)
+                }
+                permissionLauncher.launch(perms)
             }
         } catch (e: Exception) {
             Toast.makeText(this, "Permission error: ${e.message}", Toast.LENGTH_SHORT).show()
