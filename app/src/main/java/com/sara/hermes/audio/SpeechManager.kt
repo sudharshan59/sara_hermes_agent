@@ -154,13 +154,13 @@ class SpeechManager(
 
         textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
-                onStart()
+                mainHandler.post { onStart() }
             }
             override fun onDone(utteranceId: String?) {
-                onDone()
+                mainHandler.post { onDone() }
             }
             override fun onError(utteranceId: String?) {
-                onDone()
+                mainHandler.post { onDone() }
             }
         })
         textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "utterance_${System.currentTimeMillis()}")

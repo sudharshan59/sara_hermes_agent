@@ -10,6 +10,7 @@ import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.KeyEvent
+import android.widget.Toast
 
 class DeviceActionHandler(private val context: Context) {
 
@@ -125,8 +126,8 @@ class DeviceActionHandler(private val context: Context) {
         // ========================================== 
         // 6. Alarms with exact time parsing
         // ========================================== 
-        if (q.contains("alarm") || q.contains("அலாரம்")) {
-            val alarmResult = parseAndSetAlarm(q)
+        if (q.contains("alarm") || q.contains("அலாரம்") || q.contains("wake me") || q.contains("எழுப்பு")) {
+            val alarmResult = parseAndSetAlarm(raw) ?: parseAndSetAlarm(q)
             if (alarmResult != null) return alarmResult
         }
 
@@ -252,26 +253,37 @@ class DeviceActionHandler(private val context: Context) {
 
     // --- Smart Alarm Parser ---
     private fun parseAndSetAlarm(query: String): ActionResult? {
-        val isTamil = query.any { it in '\u0B80'..'\u0BFF' } || query.contains("alaraam")
+        val isTamil = query.any { it in '\u0B80'..'\u0BFF' } || query.contains("alaraam") || query.contains("ezhuppu")
         var hour = -1
         var minutes = 0
         val isPm = query.contains("pm") || query.contains("night") || query.contains("evening") || query.contains("இரவு") || query.contains("மாலை")
         val isAm = query.contains("am") || query.contains("morning") || query.contains("காலை")
 
+        // Normalize "7 .00", "7.00", "7 : 00" to "7:00"
+        var normalized = query.replace(Regex("""(\d{1,2})\s*[\.:]\s*(\d{2})"""), "$1:$2")
+        // Normalize "7 00 clock" or "7 00" to "7:00"
+        normalized = normalized.replace(Regex("""\b(\d{1,2})\s+(\d{2})\s*(o'?clock|clock|am|pm|\b)"""), "$1:$2 $3")
+
         // Try parsing "7:30" pattern
-        val timeColonRegex = Regex("""(\d{1,2}):(\d{2})""")
-        val colonMatch = timeColonRegex.find(query)
+        val timeColonRegex = Regex("""\b(\d{1,2}):(\d{2})\b""")
+        val colonMatch = timeColonRegex.find(normalized)
         if (colonMatch != null) {
             hour = colonMatch.groupValues[1].toIntOrNull() ?: -1
             minutes = colonMatch.groupValues[2].toIntOrNull() ?: 0
         } else {
-            // Match word numbers or digits: "7 o clock", "7 clock", "at 7", "for 7"
-            val digitRegex = Regex("""\b(\d{1,2})\b""")
-            val matches = digitRegex.findAll(query).mapNotNull { it.groupValues[1].toIntOrNull() }.toList()
-            for (n in matches) {
-                if (n in 1..24) {
-                    hour = n
-                    break
+            // Match "7 o clock", "7 clock", "7 மணி"
+            val oclockRegex = Regex("""\b(\d{1,2})\s*(o'?clock|clock|\u0baeணி)\b""")
+            val oclockMatch = oclockRegex.find(normalized)
+            if (oclockMatch != null) {
+                hour = oclockMatch.groupValues[1].toIntOrNull() ?: -1
+            } else {
+                val digitRegex = Regex("""\b(\d{1,2})\b""")
+                val matches = digitRegex.findAll(normalized).mapNotNull { it.groupValues[1].toIntOrNull() }.toList()
+                for (n in matches) {
+                    if (n in 1..24) {
+                        hour = n
+                        break
+                    }
                 }
             }
         }
@@ -287,9 +299,9 @@ class DeviceActionHandler(private val context: Context) {
             val amPmStr = if (hour >= 12) "PM" else "AM"
             val minuteStr = if (minutes < 10) "0$minutes" else "$minutes"
             val speech = if (isTamil) {
-                "அலாரம் $displayHour:$minuteStr $amPmStr-க்கு வைக்கப்படுகிறது"
+                "அலாரம் $displayHour:$minuteStr $amPmStr-க்கு வைக்கப்பட்டது. பணி முடிந்தது."
             } else {
-                "Setting alarm for $displayHour:$minuteStr $amPmStr"
+                "I set your alarm for $displayHour:$minuteStr $amPmStr. I completed the task."
             }
 
             return ActionResult.Handled(speech) {
@@ -298,29 +310,32 @@ class DeviceActionHandler(private val context: Context) {
                         putExtra(AlarmClock.EXTRA_HOUR, hour)
                         putExtra(AlarmClock.EXTRA_MINUTES, minutes)
                         putExtra(AlarmClock.EXTRA_MESSAGE, "Siri Alarm")
-                        putExtra(AlarmClock.EXTRA_SKIP_UI, false)
+                        putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(intent)
+                    Toast.makeText(context, "Alarm set for $displayHour:$minuteStr $amPmStr", Toast.LENGTH_SHORT).show()
                 } catch (_: Exception) {
-                    val fallback = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    try {
+                        val fallback = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                            putExtra(AlarmClock.EXTRA_HOUR, hour)
+                            putExtra(AlarmClock.EXTRA_MINUTES, minutes)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(fallback)
+                        Toast.makeText(context, "Alarm set for $displayHour:$minuteStr $amPmStr", Toast.LENGTH_SHORT).show()
+                    } catch (_: Throwable) {
+                        try {
+                            val clockIntent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(clockIntent)
+                        } catch (_: Throwable) {}
                     }
-                    context.startActivity(fallback)
                 }
             }
         }
-
-        // Generic alarm fallback
-        val fallbackSpeech = if (isTamil) "அலாரம் திறக்கப்படுகிறது" else "Opening Alarm clock"
-        return ActionResult.Handled(fallbackSpeech) {
-            try {
-                val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-            } catch (_: Exception) {}
-        }
+        return null
     }
 
     // --- Smart Timer Parser ---

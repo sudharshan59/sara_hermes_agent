@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.speech.RecognizerIntent
+import android.view.WindowManager
 import android.widget.Toast
 import java.util.Locale
 import androidx.activity.ComponentActivity
@@ -28,6 +29,7 @@ import com.sara.hermes.data.DeviceActionHandler
 import com.sara.hermes.ui.HomeScreen
 import com.sara.hermes.ui.SaraHermesTheme
 import com.sara.hermes.ui.SettingsDialog
+import com.sara.hermes.ui.SiriOverlay
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -41,6 +43,7 @@ class MainActivity : ComponentActivity() {
     private var showSettingsDialog by mutableStateOf(false)
     private var backendUrl by mutableStateOf("http://10.0.2.2:8000")
     private var isBackgroundListening by mutableStateOf(true)
+    private var isOverlayMode by mutableStateOf(false)
 
     private lateinit var speechManager: SpeechManager
     private lateinit var apiClient: ApiClient
@@ -95,6 +98,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Wake screen and show over lockscreen like Siri and Google Assistant
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
+        }
+
         // Load saved preferences if any
         val prefs = getSharedPreferences("sara_prefs", MODE_PRIVATE)
         backendUrl = prefs.getString("backend_url", "http://10.0.2.2:8000") ?: "http://10.0.2.2:8000"
@@ -146,18 +162,31 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             SaraHermesTheme {
-                HomeScreen(
-                    state = assistantState,
-                    audioRms = audioRms,
-                    currentTranscript = currentTranscript,
-                    currentStatus = currentStatus,
-                    messages = messages,
-                    onMicToggle = { checkPermissionAndToggle() },
-                    onSendMessage = { text -> processUserInput(text) },
-                    onOpenSettings = { showSettingsDialog = true }
-                )
+                if (isOverlayMode) {
+                    SiriOverlay(
+                        state = assistantState,
+                        audioRms = audioRms,
+                        currentTranscript = currentTranscript,
+                        lastResponse = currentStatus,
+                        onMicToggle = { checkPermissionAndToggle() },
+                        onDismiss = {
+                            isOverlayMode = false
+                            finish()
+                        }
+                    )
+                } else {
+                    HomeScreen(
+                        state = assistantState,
+                        audioRms = audioRms,
+                        currentTranscript = currentTranscript,
+                        currentStatus = currentStatus,
+                        messages = messages,
+                        onMicToggle = { checkPermissionAndToggle() },
+                        onSendMessage = { text -> processUserInput(text) },
+                        onOpenSettings = { showSettingsDialog = true }
+                    )
 
-                if (showSettingsDialog) {
+                    if (showSettingsDialog) {
                     SettingsDialog(
                         currentUrl = backendUrl,
                         isBackgroundListening = isBackgroundListening,
@@ -203,21 +232,27 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-
-        // Automatically handle wake-word intent if activity launched by HeySiriService or Assist
-        handleIncomingIntent(intent)
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        handleIncomingIntent(intent)
-    }
+    // Automatically handle wake-word intent if activity launched by HeySiriService or Assist
+    handleIncomingIntent(intent)
+}
 
-    private fun handleIncomingIntent(incomingIntent: Intent?) {
-        if (incomingIntent == null) return
-        val command = incomingIntent.getStringExtra("EXTRA_COMMAND")
-        val action = incomingIntent.action
+override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    handleIncomingIntent(intent)
+}
+
+private fun handleIncomingIntent(incomingIntent: Intent?) {
+    if (incomingIntent == null) return
+    val command = incomingIntent.getStringExtra("EXTRA_COMMAND")
+    val action = incomingIntent.action
+    val isOverlay = incomingIntent.getBooleanExtra("EXTRA_OVERLAY_MODE", false)
+
+    if (isOverlay || action == "ACTION_HEY_SIRI" || action == Intent.ACTION_ASSIST || action == Intent.ACTION_VOICE_COMMAND) {
+        isOverlayMode = true
+    }
 
         if (!command.isNullOrBlank()) {
             lifecycleScope.launch {
@@ -296,6 +331,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Immediately execute device action (set alarm, pause music, torch, etc.)
+            triggerActionOnce()
+
+            // Speak out completion confirmation and wait until voice finishes before dismissing overlay
             speechManager.speak(
                 text = localAction.speechResponse,
                 onStart = {
@@ -304,17 +343,14 @@ class MainActivity : ComponentActivity() {
                 onDone = {
                     assistantState = AssistantState.IDLE
                     currentStatus = "Ready"
-                    triggerActionOnce()
+                    if (isOverlayMode) {
+                        lifecycleScope.launch {
+                            delay(1200)
+                            finish()
+                        }
+                    }
                 }
             )
-
-            // Launch within 600ms so the user feels immediate responsiveness like Siri
-            lifecycleScope.launch {
-                delay(600)
-                triggerActionOnce()
-                assistantState = AssistantState.IDLE
-                currentStatus = "Ready"
-            }
             return
         }
 
@@ -344,6 +380,12 @@ class MainActivity : ComponentActivity() {
                 onDone = {
                     assistantState = AssistantState.IDLE
                     currentStatus = "Ready"
+                    if (isOverlayMode) {
+                        lifecycleScope.launch {
+                            delay(2000)
+                            finish()
+                        }
+                    }
                 }
             )
         }

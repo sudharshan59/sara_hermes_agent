@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -255,6 +256,7 @@ class HeySiriService : Service() {
 
     private fun handleHotwordDetected(phrase: String) {
         vibrateBriefly()
+        wakeScreen()
 
         // Extract command if user said "Hey Siri open YouTube" in one breath
         val cleanCommand = phrase
@@ -269,6 +271,7 @@ class HeySiriService : Service() {
 
         val openIntent = Intent(this, MainActivity::class.java).apply {
             action = "ACTION_HEY_SIRI"
+            putExtra("EXTRA_OVERLAY_MODE", true)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             if (cleanCommand.isNotBlank()) {
                 putExtra("EXTRA_COMMAND", cleanCommand)
@@ -283,6 +286,18 @@ class HeySiriService : Service() {
 
         // Pause service listening so it doesn't collide with MainActivity's microphone
         restartListeningWithDelay(5000)
+    }
+
+    private fun wakeScreen() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            @Suppress("DEPRECATION")
+            val wakeLock = powerManager?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "sara:HeySiriWakeLock"
+            )
+            wakeLock?.acquire(3000)
+        } catch (_: Throwable) {}
     }
 
     private fun vibrateBriefly() {
