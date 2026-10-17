@@ -1,8 +1,11 @@
 import asyncio
+import html
 import httpx
 import json
+import re
 import shutil
 import subprocess
+from datetime import datetime
 from typing import Dict, Any, Optional
 from app.config import settings
 from app.services.task_manager import task_manager
@@ -98,7 +101,43 @@ class HermesAdapter:
             return proc.stdout.strip() if proc.stdout else proc.stderr.strip()
         return await loop.run_in_executor(None, _invoke)
 
+    async def _fetch_realtime_context(self, query: str) -> str:
+        triggers = [
+            'news', 'weather', 'latest', 'today', 'who', 'what', 'current',
+            'score', 'price', 'time', 'date', 'how', 'when', 'why', 'search',
+            'update', 'temperature', 'yesterday', 'tomorrow'
+        ]
+        if not any(t in query.lower() for t in triggers):
+            return ""
+        try:
+            resp = await self.client.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": query},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=4.0
+            )
+            if resp.status_code == 200:
+                snippets = re.findall(r'<a class=\"result__snippet[^>]*>(.*?)</a>', resp.text, re.DOTALL)
+                clean = [html.unescape(re.sub(r'<[^>]+>', '', s).strip()) for s in snippets[:4]]
+                valid = [s for s in clean if s]
+                if valid:
+                    return "\n".join(f"- {s}" for s in valid)
+        except Exception:
+            pass
+        return ""
+
     async def _run_via_nvidia_nim(self, prompt: str) -> str:
+        now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
+        live_context = await self._fetch_realtime_context(prompt)
+
+        system_content = (
+            f"You are Siri, a voice-first assistant powered by Hermes and AWS. "
+            f"Current date and time: {now_str}. "
+            "Keep responses concise, direct, helpful, and suitable for Text-to-Speech audio."
+        )
+        if live_context:
+            system_content += f"\n\nReal-time web search results for the user's question:\n{live_context}\nUse these real-time search results to answer accurately."
+
         headers = {
             "Authorization": f"Bearer {settings.NVIDIA_API_KEY}",
             "Content-Type": "application/json"
@@ -106,7 +145,7 @@ class HermesAdapter:
         payload = {
             "model": settings.NVIDIA_DEFAULT_MODEL,
             "messages": [
-                {"role": "system", "content": "You are Siri, a voice-first assistant powered by Hermes and AWS. Keep responses concise, direct, helpful, and suitable for Text-to-Speech audio."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.6,
